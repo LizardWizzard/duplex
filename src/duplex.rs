@@ -55,7 +55,11 @@ where
         }
     }
 
-    fn handle(&mut self, stream: &TcpStream) -> Result<(), D::Error> {
+    fn handle(
+        &mut self,
+        cx: &mut task::Context<'_>,
+        stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
+    ) -> Result<(), D::Error> {
         todo!()
     }
 }
@@ -79,7 +83,11 @@ where
         }
     }
 
-    fn handle(&mut self, stream: &TcpStream) -> Result<(), E::Error> {
+    fn handle(
+        &mut self,
+        cx: &mut task::Context<'_>,
+        stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
+    ) -> Result<(), E::Error> {
         todo!()
     }
 }
