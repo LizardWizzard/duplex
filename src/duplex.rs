@@ -87,7 +87,7 @@ where
             }
             None => {
                 'inner: loop {
-                    match bail_on_non_would_block(stream.try_read_buf(&mut encode_buf))
+                    match bail_on_non_would_block(stream.try_read_buf(&mut decode_buf))
                         .map_err(|e| Error::Io(e))?
                     {
                         // we read something, feed the buf to decoder
