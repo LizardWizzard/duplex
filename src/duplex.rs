@@ -13,7 +13,7 @@ use tokio::sync::mpsc::Sender;
 use tokio_util::codec::Decoder;
 use tokio_util::codec::Encoder;
 
-#[derive(thiserror::Error)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error<D: std::error::Error, E: std::error::Error> {
     Decode(D),
     Encode(E),
@@ -46,7 +46,7 @@ fn try_send<T>(sender: &Sender<T>, frame: T) -> Result<Option<T>, ()> {
 
 fn try_recv<T>(receiver: &mut Receiver<T>) -> Result<Option<T>, ()> {
     match receiver.try_recv() {
-        Ok(T) => Ok(Some(T)),
+        Ok(t) => Ok(Some(t)),
         Err(e) => match e {
             TryRecvError::Empty => Ok(None),
             TryRecvError::Disconnected => Err(()),

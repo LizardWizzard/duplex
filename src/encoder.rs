@@ -3,7 +3,7 @@ use tokio_util::codec::Encoder;
 
 use crate::MAX;
 
-struct MyStringEncoder {}
+pub struct MyStringEncoder {}
 
 impl Encoder<String> for MyStringEncoder {
     type Error = std::io::Error;

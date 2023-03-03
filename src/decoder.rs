@@ -3,7 +3,7 @@ use tokio_util::codec::Decoder;
 
 use crate::MAX;
 
-struct MyStringDecoder {}
+pub struct MyStringDecoder {}
 
 impl Decoder for MyStringDecoder {
     type Item = String;
