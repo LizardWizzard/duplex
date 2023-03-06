@@ -19,9 +19,17 @@ use tokio_util::codec::Decoder;
 use tokio_util::codec::Encoder;
 use tokio_util::codec::Framed;
 
-fn inspect<T>(p: Poll<T>, ctx: &'static str) -> Poll<T> {
-    tracing::info!(pending = p.is_pending(), "{ctx}");
-    p
+macro_rules! inspect {
+    ($cmd:expr, $name:literal) => {{
+        let span = tracing::info_span!($name);
+        let _guard = span.enter();
+
+        tracing::info!("POLL");
+        let res = $cmd;
+        tracing::info!(pending = res.is_pending(), "YIELD");
+
+        res
+    }};
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -68,7 +76,6 @@ where
     S: AsyncRead + AsyncWrite,
     C: Encoder<M> + Decoder<Item = M>,
 {
-    #[tracing::instrument(skip_all)]
     fn poll_send(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<<Self as Future>::Output> {
         // can we write into channel?
         // acquire permit to do that
@@ -84,16 +91,15 @@ where
 
         // TODO if let else
         tracing::info!("pre poll_reserve");
-        let permit = match ready!(inspect(fut.poll(cx), "reserve.poll")) {
+        let permit = match ready!(inspect!(fut.poll(cx), "reserve")) {
             Ok(p) => p,
             Err(_) => return Poll::Ready(Err(Error::ProcessorDied)),
         };
-        tracing::info!("post poll_reserve");
 
         // permit acquired, write to underlying framed
         let framed = this.framed;
 
-        let frame = match ready!(inspect(framed.poll_next(cx), "framed.poll_next")) {
+        let frame = match ready!(inspect!(framed.poll_next(cx), "framed.poll_next")) {
             Some(frame) => frame.map_err(|_| Error::Protocol("whoopsie"))?,
             None => return Poll::Ready(Err(Error::Io(io::Error::from(ErrorKind::UnexpectedEof)))),
         };
@@ -103,13 +109,12 @@ where
         Poll::Ready(Ok(()))
     }
 
-    #[tracing::instrument(skip_all)]
     fn poll_recv(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<<Self as Future>::Output> {
         let mut this = self.project();
 
         // TODO remove map_err?
         tracing::info!("pre poll_ready");
-        ready!(inspect(
+        ready!(inspect!(
             this.framed.as_mut().poll_ready(cx),
             "framed.poll_ready"
         ))
@@ -117,7 +122,7 @@ where
         tracing::info!("post poll_ready");
 
         tracing::info!("pre poll_recv");
-        let frame = match ready!(inspect(
+        let frame = match ready!(inspect!(
             this.receiver.as_mut().poll_recv(cx),
             "receiver.poll_recv"
         )) {
@@ -151,13 +156,13 @@ where
                 return Poll::Pending;
             }
 
-            match inspect(self.as_mut().poll_send(cx), "poll_send") {
+            match inspect!(self.as_mut().poll_send(cx), "poll_send") {
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Ready(Ok(())) => { /* send succeeded */ }
                 Poll::Pending => send_pending = true,
             }
 
-            match inspect(self.as_mut().poll_recv(cx), "poll_receive") {
+            match inspect!(self.as_mut().poll_recv(cx), "poll_recv") {
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Ready(Ok(())) => { /* receive succeeded */ }
                 Poll::Pending => receive_pending = true,
