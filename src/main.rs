@@ -6,6 +6,7 @@ use tokio::{
     sync::mpsc::{Receiver, Sender},
 };
 use tokio_util::codec::{Decoder, Encoder};
+use tracing::Instrument;
 
 const ADDR: &str = "127.0.0.1:34254";
 
@@ -22,6 +23,7 @@ async fn echo_worker(mut receiver: Receiver<String>, sender: Sender<String>) {
     }
 }
 
+#[tracing::instrument(skip_all)]
 async fn server() -> io::Result<()> {
     let listener = TcpListener::bind(ADDR).await?;
     let (stream, _) = listener.accept().await?;
@@ -29,7 +31,7 @@ async fn server() -> io::Result<()> {
     let (send_tx, send_rx) = tokio::sync::mpsc::channel::<String>(10);
     let (reply_tx, reply_rx) = tokio::sync::mpsc::channel::<String>(10);
 
-    tokio::spawn(echo_worker(send_rx, reply_tx));
+    tokio::spawn(echo_worker(send_rx, reply_tx).in_current_span());
 
     let codec = proto::MyStringCodec {};
     Shuttle::new(stream, codec, send_tx, reply_rx)
