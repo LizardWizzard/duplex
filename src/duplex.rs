@@ -148,6 +148,7 @@ where
 
     #[tracing::instrument(skip_all)]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        tracing::info!("POLL");
         let mut send_pending = false;
         let mut recv_pending = false;
         loop {
