@@ -9,7 +9,7 @@ edition = "2021"
 bytes = { version = "1.4.0", features = ["serde"] }
 futures = "0.3.26"
 thiserror = "1.0.38"
-tokio = { version = "1.26.0", features = ["full"] }
+tokio = { version = "1.26.0", features = ["full", "tracing"] }
 tokio-stream = { version = "0.1.12", features = [
     "tokio-util",
     "sync",
@@ -19,3 +19,4 @@ tokio-util = { version = "0.7.7", features = ["codec", "full"] }
 pin-project = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+console-subscriber = "*"

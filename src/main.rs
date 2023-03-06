@@ -6,6 +6,7 @@ use tokio::{
     sync::mpsc::{Receiver, Sender},
 };
 use tokio_util::codec::{Decoder, Encoder};
+use tracing::Level;
 
 const ADDR: &str = "127.0.0.1:34254";
 
@@ -84,7 +85,18 @@ async fn client() -> io::Result<()> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    use tracing_subscriber::prelude::*;
+
+    let console_layer = console_subscriber::spawn();
+
+    let filter_layer =
+        tracing_subscriber::filter::FilterFn::new(|m| m.target().starts_with("duplex"));
+
+    tracing_subscriber::registry()
+        .with(console_layer)
+        .with(filter_layer)
+        .with(tracing_subscriber::fmt::layer())
+        .init();
 
     let server_jh = tokio::spawn(server());
     let client_jh = tokio::spawn(client());
