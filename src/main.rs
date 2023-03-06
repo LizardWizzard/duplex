@@ -1,4 +1,5 @@
 use bytes::BytesMut;
+use duplex::Shuttle;
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -9,9 +10,8 @@ use tokio_util::codec::{Decoder, Encoder};
 const MAX: usize = 8 * 1024 * 1024;
 const ADDR: &str = "127.0.0.1:34254";
 
-mod decoder;
 mod duplex;
-mod encoder;
+mod proto;
 
 async fn echo_worker(mut receiver: Receiver<String>, sender: Sender<String>) {
     println!("echo: waiting");
@@ -32,12 +32,11 @@ async fn server() -> io::Result<()> {
 
     tokio::spawn(echo_worker(send_rx, reply_tx));
 
-    let decoder = decoder::MyStringDecoder {};
-    let encoder = encoder::MyStringEncoder {};
+    let codec = proto::MyStringCodec {};
 
-    duplex::spawn_duplex(stream, decoder, encoder, send_tx, reply_rx)
+    Shuttle::new(stream, codec, send_tx, reply_rx)
         .await
-        .expect("duplex failed");
+        .expect("failed");
 
     Ok(())
 }
@@ -45,15 +44,14 @@ async fn server() -> io::Result<()> {
 async fn client() -> io::Result<()> {
     let mut stream = TcpStream::connect(ADDR).await?;
 
-    let mut encoder = encoder::MyStringEncoder {};
-    let mut decoder = decoder::MyStringDecoder {};
+    let mut codec = proto::MyStringCodec {};
     let mut buf = BytesMut::new();
 
     // ping pong
     for i in 0..2 {
         let msg = format!("Hello {}", i);
         println!("sending: {}", msg);
-        encoder
+        codec
             .encode(format!("Hello {}", i), &mut buf)
             .expect("encode failed");
         stream.write_all_buf(&mut buf).await?;
@@ -63,13 +61,13 @@ async fn client() -> io::Result<()> {
             let len = stream.read_buf(&mut buf).await?;
 
             if len == 0 {
-                while let Some(frame) = decoder.decode_eof(&mut buf)? {
+                while let Some(frame) = codec.decode_eof(&mut buf)? {
                     println!("received: {}", frame);
                 }
                 break;
             }
 
-            while let Some(frame) = decoder.decode(&mut buf)? {
+            while let Some(frame) = codec.decode(&mut buf)? {
                 println!("received: {}", frame);
             }
         }

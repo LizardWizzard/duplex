@@ -1,251 +1,139 @@
 use std::io;
 use std::io::ErrorKind;
+use std::pin::Pin;
+use std::task::ready;
+use std::task::Context;
+use std::task::Poll;
 
-use bytes::Buf;
-use tokio::io::Interest;
-use tokio::net::TcpStream;
+use futures::Future;
+use futures::Sink;
+use futures::Stream;
+use tokio::io::AsyncRead;
+use tokio::io::AsyncWrite;
 
-use bytes::BytesMut;
-use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::mpsc::error::TrySendError;
+use pin_project::pin_project;
+use tokio::pin;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 use tokio_util::codec::Decoder;
 use tokio_util::codec::Encoder;
+use tokio_util::codec::Framed;
 
 #[derive(thiserror::Error, Debug)]
-pub enum Error<D, E> {
-    Decode(D),
-    Encode(E),
-    Io(std::io::Error),
-    Internal(&'static str),
+pub enum Error {
+    #[error("protocol {0}")]
+    Protocol(&'static str), // FIXME
+    #[error("io")]
+    Io(#[from] std::io::Error),
+    #[error("processor died")]
+    ProcessorDied,
 }
 
-fn bail_on_non_would_block(r: io::Result<usize>, ctx: &'static str) -> io::Result<Option<usize>> {
-    match r {
-        Ok(v) => Ok(Some(v)),
-        Err(e) => {
-            if e.kind() == ErrorKind::WouldBlock {
-                println!("would block {}", ctx);
-                return Ok(None);
-            } else {
-                return Err(e);
-            }
-        }
-    }
-}
-
-fn try_send<T>(sender: &Sender<T>, frame: T) -> Result<Option<T>, ()> {
-    match sender.try_send(frame) {
-        Ok(_) => Ok(None),
-        Err(e) => match e {
-            TrySendError::Full(frame) => Ok(Some(frame)),
-            TrySendError::Closed(_) => Err(()),
-        },
-    }
-}
-
-fn try_recv<T>(receiver: &mut Receiver<T>) -> Result<Option<T>, ()> {
-    match receiver.try_recv() {
-        Ok(t) => Ok(Some(t)),
-        Err(e) => match e {
-            TryRecvError::Empty => Ok(None),
-            TryRecvError::Disconnected => Err(()),
-        },
-    }
-}
-
-struct SenderCtx<F, D: Decoder<Item = F>> {
-    sender: Sender<F>,
-    decoder: D,
-    decode_buf: BytesMut,
-}
-
-impl<F, D: Decoder<Item = F>> SenderCtx<F, D> {
-    fn new(sender: Sender<F>, decoder: D) -> Self {
-        Self {
-            sender,
-            decoder,
-            decode_buf: BytesMut::new(),
-        }
-    }
-}
-
-struct ReceiverCtx<F, E: Encoder<F>> {
-    receiver: Receiver<F>,
-    encoder: E,
-    // encode buf contains only one message we've received from processor
-    // if we want to store more messages we need to take care of fairness
-    encode_buf: BytesMut,
-}
-
-impl<F, E: Encoder<F>> ReceiverCtx<F, E> {
-    fn new(receiver: Receiver<F>, encoder: E) -> Self {
-        Self {
-            receiver,
-            encoder,
-            encode_buf: BytesMut::new(),
-        }
-    }
-}
-
-pub async fn spawn_duplex<F, E, D>(
-    stream: TcpStream,
-    decoder: D,
-    encoder: E,
-    sender: Sender<F>,
-    receiver: Receiver<F>,
-) -> Result<(), Error<D::Error, E::Error>>
+#[pin_project]
+pub struct Shuttle<S, M, C>
 where
-    E: Encoder<F>,
-    E::Error: std::error::Error,
-    D: Decoder<Item = F>,
-    D::Error: std::error::Error,
+    S: AsyncRead + AsyncWrite,
+    C: Encoder<M> + Decoder<Item = M>,
 {
-    let mut sender_ctx = SenderCtx::new(sender, decoder);
-    let mut receiver_ctx = ReceiverCtx::new(receiver, encoder);
-
-    // send to processor
-    let mut pending_send_slot: Option<F> = None;
-
-    loop {
-        let mut read_blocked = false;
-        let mut write_blocked = false;
-        let mut receive_blocked = false;
-
-        match pending_send_slot.take() {
-            Some(frame) => {
-                pending_send_slot = try_send(&sender_ctx.sender, frame)
-                    .map_err(|_| Error::Internal("processor is dead"))?;
-            }
-            None => {
-                'inner: loop {
-                    match bail_on_non_would_block(
-                        stream.try_read_buf(&mut sender_ctx.decode_buf),
-                        "try_read",
-                    )
-                    .map_err(|e| Error::Io(e))?
-                    {
-                        // we read something, feed the buf to decoder
-                        Some(_) => {
-                            if let Some(frame) = sender_ctx
-                                .decoder
-                                .decode(&mut sender_ctx.decode_buf)
-                                .map_err(|e| Error::Decode(e))?
-                            {
-                                // we managed to decode the frame, try to send it, if channel is full store frame in slot
-                                pending_send_slot = try_send(&sender_ctx.sender, frame)
-                                    .map_err(|_| Error::Internal("processor is dead"))?;
-                                break 'inner;
-                            }
-                        }
-                        None => {
-                            read_blocked = true;
-                            break 'inner;
-                        }
-                    }
-                }
-            }
-        }
-
-        if receiver_ctx.encode_buf.is_empty() {
-            // we dont have something to write into the socket
-            // try to receive and write if we got something (without attempting to get next message to be fair)
-            match try_recv(&mut receiver_ctx.receiver)
-                .map_err(|_| Error::Internal("processor is dead"))?
-            {
-                Some(frame) => {
-                    receiver_ctx
-                        .encoder
-                        .encode(frame, &mut receiver_ctx.encode_buf)
-                        .map_err(|e| Error::Encode(e))?;
-
-                    // TODO cleanup, repetitive
-                    'inner: loop {
-                        match bail_on_non_would_block(
-                            stream.try_write(&receiver_ctx.encode_buf),
-                            "try_write_1",
-                        )
-                        .map_err(|e| Error::Io(e))?
-                        {
-                            Some(written) => {
-                                receiver_ctx.encode_buf.advance(written);
-                                if receiver_ctx.encode_buf.is_empty() {
-                                    // do not attempt to receive new message, go to other duties to be fair
-                                    break 'inner;
-                                }
-                            }
-                            None => {
-                                write_blocked = true;
-                                break 'inner;
-                            }
-                        }
-                    }
-                }
-                None => receive_blocked = true,
-            }
-        } else {
-            // we have something to write into the socket
-            // try to write it and if we wrote everything try to get new message but dont start writing it to be fair
-            'inner: loop {
-                match bail_on_non_would_block(
-                    stream.try_write(&receiver_ctx.encode_buf),
-                    "try_write_2",
-                )
-                .map_err(|e| Error::Io(e))?
-                {
-                    Some(written) => {
-                        receiver_ctx.encode_buf.advance(written);
-                        if receiver_ctx.encode_buf.is_empty() {
-                            match try_recv(&mut receiver_ctx.receiver)
-                                .map_err(|_| Error::Internal("processor is dead"))?
-                            {
-                                Some(frame) => {
-                                    receiver_ctx
-                                        .encoder
-                                        .encode(frame, &mut receiver_ctx.encode_buf)
-                                        .map_err(|e| Error::Encode(e))?;
-                                }
-                                None => {
-                                    receive_blocked = true;
-                                    break 'inner;
-                                }
-                            }
-                        }
-                    }
-                    None => {
-                        write_blocked = true;
-                        break 'inner;
-                    }
-                }
-            }
-        };
-
-        // what we need to wait for in order to make progress?
-        // if we would blocked on read, we wait for Interest::READABLE
-        // if we would blocked on write, we wait for Interest::WRITABLE
-        dbg!(read_blocked, write_blocked);
-        let interest = {
-            match (read_blocked, write_blocked) {
-                (false, false) => None,
-                (false, true) => Some(Interest::WRITABLE),
-                (true, false) => Some(Interest::READABLE),
-                (true, true) => Some(Interest::READABLE | Interest::WRITABLE),
-            }
-        };
-
-        tokio::select! {
-            _ = stream.ready(interest.unwrap()), if interest.is_some() => {
-                println!("stream ready")
-            },
-            // if we have send slot we must've blocked on try_send so we can wait on sender.reserve
-            _ = sender_ctx.sender.reserve(), if pending_send_slot.is_some() => {
-                println!("sender ready")
-            },
-            // TODO if we blocked on recv we can wait on receiver.peek()
-            _ = tokio::task::yield_now(), if receive_blocked => {}
-        }
-    }
-    // no shutdown other than with Error
+    #[pin]
+    framed: Framed<S, C>,
+    #[pin]
+    sender: Sender<M>,
+    #[pin]
+    receiver: Receiver<M>,
 }
 
+impl<S, M, C> Shuttle<S, M, C>
+where
+    S: AsyncRead + AsyncWrite,
+    C: Encoder<M> + Decoder<Item = M>,
+{
+    pub fn new(stream: S, codec: C, sender: Sender<M>, receiver: Receiver<M>) -> Self {
+        let framed = codec.framed(stream);
+        Self {
+            framed,
+            sender,
+            receiver,
+        }
+    }
+}
+
+impl<S, M, C> Shuttle<S, M, C>
+where
+    S: AsyncRead + AsyncWrite,
+    C: Encoder<M> + Decoder<Item = M>,
+{
+    fn poll_send(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<<Self as Future>::Output> {
+        // can we write into channel?
+        // acquire permit to do that
+        let this = self.project();
+
+        let fut = this.sender.reserve();
+        pin!(fut);
+
+        let permit = match ready!(fut.poll(cx)) {
+            Ok(p) => p,
+            Err(_) => return Poll::Ready(Err(Error::ProcessorDied)),
+        };
+
+        // permit acquired, write to underlying framed
+        let framed = this.framed;
+
+        let frame = match ready!(framed.poll_next(cx)) {
+            Some(frame) => frame.map_err(|_| Error::Protocol("whoopsie"))?,
+            None => return Poll::Ready(Err(Error::Io(io::Error::from(ErrorKind::UnexpectedEof)))),
+        };
+
+        permit.send(frame);
+
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_receive(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<<Self as Future>::Output> {
+        let mut this = self.project();
+
+        ready!(this.framed.poll_ready(cx));
+
+        let frame = match ready!(this.receiver.poll_recv(cx)) {
+            Some(frame) => frame,
+            None => return Poll::Ready(Err(Error::ProcessorDied)),
+        };
+
+        this.framed
+            .start_send(frame)
+            .map_err(|_| Error::Protocol("uh oh"))?;
+
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl<S, M, C> Future for Shuttle<S, M, C>
+where
+    S: AsyncRead + AsyncWrite,
+    C: Encoder<M> + Decoder<Item = M>,
+{
+    type Output = Result<(), Error>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut send_pending = false;
+        let mut receive_pending = false;
+        loop {
+            if send_pending && receive_pending {
+                return Poll::Pending;
+            }
+            
+
+            match self.poll_send(cx) {
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Ok(())) => { /* send succeeded */ }
+                Poll::Pending => send_pending = true,
+            }
+
+            match self.poll_receive(cx) {
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Ok(())) => { /* receive succeeded */ }
+                Poll::Pending => receive_pending = true,
+            }
+        }
+    }
+}
