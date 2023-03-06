@@ -80,7 +80,7 @@ async fn client() -> io::Result<()> {
     Ok(())
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     let server_jh = tokio::spawn(server());
     let client_jh = tokio::spawn(client());
