@@ -81,7 +81,7 @@ async fn client() -> io::Result<()> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt().with_target(false).init();
 
     let server_jh = tokio::spawn(server());
     let client_jh = tokio::spawn(client());

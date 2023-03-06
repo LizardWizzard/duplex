@@ -28,7 +28,7 @@ fn inspect<T>(p: Poll<T>, ctx: &'static str) -> Poll<T> {
 pub enum Error {
     #[error("protocol {0}")]
     Protocol(&'static str), // FIXME
-                            //
+    //
     #[error("io")]
     Io(#[from] std::io::Error),
 
