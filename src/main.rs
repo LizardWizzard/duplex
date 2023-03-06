@@ -12,12 +12,13 @@ const ADDR: &str = "127.0.0.1:34254";
 mod duplex;
 mod proto;
 
+#[tracing::instrument(skip_all)]
 async fn echo_worker(mut receiver: Receiver<String>, sender: Sender<String>) {
-    println!("echo: waiting");
+    tracing::info!("echo: waiting");
     while let Some(msg) = receiver.recv().await {
-        println!("echo: got message {}", msg);
+        tracing::info!("echo: got message {}", msg);
         sender.send(msg).await.expect("disconnected");
-        println!("echo: sent");
+        tracing::info!("echo: sent");
     }
 }
 
@@ -40,6 +41,7 @@ async fn server() -> io::Result<()> {
     Ok(())
 }
 
+#[tracing::instrument]
 async fn client() -> io::Result<()> {
     let mut stream = TcpStream::connect(ADDR).await?;
 
@@ -49,28 +51,28 @@ async fn client() -> io::Result<()> {
     // ping pong
     for i in 0..2 {
         let msg = format!("Hello {}", i);
-        println!("sending: {}", msg);
+        tracing::info!("sending: {}", msg);
         codec
             .encode(format!("Hello {}", i), &mut buf)
             .expect("encode failed");
-        println!("writing: {}", msg);
+        tracing::info!("writing: {}", msg);
         stream.write_all_buf(&mut buf).await?;
-        println!("written: {}", msg);
+        tracing::info!("written: {}", msg);
         buf.clear();
         loop {
             // The read_buf call will append to buf rather than overwrite existing data.
-            println!("reading");
+            tracing::info!("reading");
             let len = stream.read_buf(&mut buf).await?;
-            println!("read");
+            tracing::info!("read");
             if len == 0 {
                 while let Some(frame) = codec.decode_eof(&mut buf)? {
-                    println!("received: {}", frame);
+                    tracing::info!("received: {}", frame);
                 }
                 break;
             }
 
             while let Some(frame) = codec.decode(&mut buf)? {
-                println!("received: {}", frame);
+                tracing::info!("received: {}", frame);
             }
             break;
         }
@@ -82,6 +84,8 @@ async fn client() -> io::Result<()> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    tracing_subscriber::fmt::init();
+
     let server_jh = tokio::spawn(server());
     let client_jh = tokio::spawn(client());
 

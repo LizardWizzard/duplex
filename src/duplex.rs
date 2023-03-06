@@ -20,7 +20,7 @@ use tokio_util::codec::Encoder;
 use tokio_util::codec::Framed;
 
 fn inspect<T>(p: Poll<T>, ctx: &'static str) -> Poll<T> {
-    println!("{ctx} pending: {}", p.is_pending());
+    tracing::info!("{ctx} pending: {}", p.is_pending());
     p
 }
 
@@ -65,6 +65,9 @@ where
     C: Encoder<M> + Decoder<Item = M>,
 {
     fn poll_send(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<<Self as Future>::Output> {
+        let span = tracing::info_span!("poll_send");
+        let _enter = span.enter();
+
         // can we write into channel?
         // acquire permit to do that
         let this = self.project();
@@ -78,12 +81,12 @@ where
         pin!(fut);
 
         // TODO if let else
-        println!("poll_receive pre poll_reserve");
+        tracing::info!("pre poll_reserve");
         let permit = match ready!(inspect(fut.poll(cx), "reserve.poll")) {
             Ok(p) => p,
             Err(_) => return Poll::Ready(Err(Error::ProcessorDied)),
         };
-        println!("poll_receive post poll_reserve");
+        tracing::info!("post poll_reserve");
 
         // permit acquired, write to underlying framed
         let framed = this.framed;
@@ -98,19 +101,22 @@ where
         Poll::Ready(Ok(()))
     }
 
-    fn poll_receive(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<<Self as Future>::Output> {
+    fn poll_recv(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<<Self as Future>::Output> {
+        let span = tracing::info_span!("poll_recv");
+        let _enter = span.enter();
+
         let mut this = self.project();
 
         // TODO remove map_err?
-        println!("poll_receive pre poll_ready");
+        tracing::info!("pre poll_ready");
         ready!(inspect(
             this.framed.as_mut().poll_ready(cx),
             "framed.poll_ready"
         ))
         .map_err(|_| Error::Protocol("uh oh"))?;
-        println!("poll_receive post poll_ready");
+        tracing::info!("post poll_ready");
 
-        println!("poll_receive pre poll_recv");
+        tracing::info!("pre poll_recv");
         let frame = match ready!(inspect(
             this.receiver.as_mut().poll_recv(cx),
             "receiver.poll_recv"
@@ -118,7 +124,7 @@ where
             Some(frame) => frame,
             None => return Poll::Ready(Err(Error::ProcessorDied)),
         };
-        println!("poll_receive post poll_recv");
+        tracing::info!("post poll_recv");
 
         this.framed
             .start_send(frame)
@@ -139,7 +145,11 @@ where
         let mut send_pending = false;
         let mut receive_pending = false;
         loop {
-            dbg!(send_pending, receive_pending);
+            tracing::info!(
+                "poll: send_pending={} receive_pending={}",
+                send_pending,
+                receive_pending,
+            );
             if send_pending && receive_pending {
                 return Poll::Pending;
             }
@@ -150,7 +160,7 @@ where
                 Poll::Pending => send_pending = true,
             }
 
-            match inspect(self.as_mut().poll_receive(cx), "poll_receive") {
+            match inspect(self.as_mut().poll_recv(cx), "poll_receive") {
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Ready(Ok(())) => { /* receive succeeded */ }
                 Poll::Pending => receive_pending = true,
