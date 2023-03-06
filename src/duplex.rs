@@ -136,6 +136,7 @@ where
             .start_send(frame)
             .map_err(|_| Error::Protocol("uh oh"))?;
 
+        // TODO think about moving outer loop into the function, so we gather messages amortizing the flush cost
         ready!(inspect!(
             this.framed.as_mut().poll_flush(cx),
             "framed.poll_flush"
