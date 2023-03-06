@@ -95,7 +95,6 @@ where
         pin!(fut);
 
         // TODO if let else
-        tracing::info!("pre poll_reserve");
         let permit = match ready!(inspect!(fut.poll(cx), "reserve")) {
             Ok(p) => p,
             Err(_) => return Poll::Ready(Err(Error::ProcessorDied)),
@@ -118,15 +117,12 @@ where
         let mut this = self.project();
 
         // TODO remove map_err?
-        tracing::info!("pre poll_ready");
         ready!(inspect!(
             this.framed.as_mut().poll_ready(cx),
             "framed.poll_ready"
         ))
         .map_err(|_| Error::Protocol("uh oh"))?;
-        tracing::info!("post poll_ready");
 
-        tracing::info!("pre poll_recv");
         let frame = match ready!(inspect!(
             this.receiver.as_mut().poll_recv(cx),
             "receiver.poll_recv"
@@ -134,7 +130,6 @@ where
             Some(frame) => frame,
             None => return Poll::Ready(Err(Error::ProcessorDied)),
         };
-        tracing::info!("post poll_recv");
 
         this.framed
             .start_send(frame)
