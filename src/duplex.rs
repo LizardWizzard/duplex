@@ -6,7 +6,8 @@ use std::task::Context;
 use std::task::Poll;
 
 use futures::Future;
-use futures::Sink;
+use futures::sink::Buffer;
+use futures::{Sink, SinkExt};
 use futures::Stream;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
@@ -18,6 +19,7 @@ use tokio::sync::mpsc::Sender;
 use tokio_util::codec::Decoder;
 use tokio_util::codec::Encoder;
 use tokio_util::codec::Framed;
+use tokio_util::sync::PollSender;
 
 macro_rules! inspect {
     ($cmd:expr, $name:literal) => {{
@@ -55,7 +57,7 @@ pub struct Shuttle<S, M, C> {
     framed: Framed<S, C>,
 
     #[pin]
-    sender: Sender<M>,
+    sender: Buffer<PollSender<M>, M>,
 
     #[pin]
     receiver: Receiver<M>,
@@ -63,10 +65,12 @@ pub struct Shuttle<S, M, C> {
 
 impl<S, M, C> Shuttle<S, M, C>
 where
+    M: Send + 'static,
     S: AsyncRead + AsyncWrite,
     C: Encoder<M, Error = io::Error> + Decoder<Item = M, Error = io::Error>,
 {
     pub fn new(stream: S, codec: C, sender: Sender<M>, receiver: Receiver<M>) -> Self {
+        let sender = PollSender::new(sender).buffer(1);
         let framed = codec.framed(stream);
         Self {
             framed,
@@ -78,37 +82,23 @@ where
 
 impl<S, M, C> Shuttle<S, M, C>
 where
+    M: Send + 'static,
     S: AsyncRead + AsyncWrite,
     C: Encoder<M> + Decoder<Item = M>,
 {
     fn poll_send(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<<Self as Future>::Output> {
-        // can we write into channel?
-        // acquire permit to do that
-        let this = self.project();
+        let mut this = self.project();
 
-        // TODO pukable stream analogous to https://docs.rs/futures/latest/futures/sink/struct.Buffer.html
-        //     but with access to internal Buffer
-        //     or emulate with poll_flush on Buffer, ready means empty buf?
+        // Flush a buffered message before fetching a new one.
+        ready!(this.sender.as_mut().poll_flush(cx).map_err(|_| Error::ProcessorDied))?;
 
-        // TODO reserve_owned, or slot
-        let fut = this.sender.reserve();
-        pin!(fut);
-
-        // TODO if let else
-        let permit = match ready!(inspect!(fut.poll(cx), "reserve")) {
-            Ok(p) => p,
-            Err(_) => return Poll::Ready(Err(Error::ProcessorDied)),
-        };
-
-        // permit acquired, write to underlying framed
-        let framed = this.framed;
-
-        let frame = match ready!(inspect!(framed.poll_next(cx), "framed.poll_next")) {
+        let frame = match ready!(inspect!(this.framed.poll_next(cx), "framed.poll_next")) {
             Some(frame) => frame.map_err(|_| Error::Protocol("whoopsie"))?,
             None => return Poll::Ready(Err(Error::Io(io::Error::from(ErrorKind::UnexpectedEof)))),
         };
 
-        permit.send(frame);
+        // We don't need to call sender's `poll_ready` because it's been flushed.
+        this.sender.start_send(frame).map_err(|_| Error::ProcessorDied)?;
 
         Poll::Ready(Ok(()))
     }
@@ -149,6 +139,7 @@ where
 
 impl<S, M, C> Future for Shuttle<S, M, C>
 where
+    M: Send + 'static,
     S: AsyncRead + AsyncWrite,
     C: Encoder<M> + Decoder<Item = M>,
 {
