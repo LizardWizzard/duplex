@@ -123,6 +123,12 @@ where
         ))
         .map_err(|_| Error::Protocol("uh oh"))?;
 
+        ready!(inspect!(
+            this.framed.as_mut().poll_flush(cx),
+            "framed.poll_flush"
+        ))
+        .map_err(|_| Error::Protocol("uh oh"))?;
+
         let frame = match ready!(inspect!(
             this.receiver.as_mut().poll_recv(cx),
             "receiver.poll_recv"
