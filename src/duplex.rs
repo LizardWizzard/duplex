@@ -25,8 +25,13 @@ macro_rules! inspect {
         let _guard = span.enter();
 
         tracing::info!("POLL");
+
         let res = $cmd;
-        tracing::info!(pending = res.is_pending(), "YIELD");
+        if res.is_pending() {
+            tracing::info!("YIELD")
+        } else {
+            tracing::info!("RETURN")
+        };
 
         res
     }};
