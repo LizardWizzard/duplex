@@ -20,7 +20,7 @@ use tokio_util::codec::Encoder;
 use tokio_util::codec::Framed;
 
 fn inspect<T>(p: Poll<T>, ctx: &'static str) -> Poll<T> {
-    tracing::info!("{ctx} pending: {}", p.is_pending());
+    tracing::info!(pending = p.is_pending(), "{ctx}");
     p
 }
 
@@ -28,8 +28,10 @@ fn inspect<T>(p: Poll<T>, ctx: &'static str) -> Poll<T> {
 pub enum Error {
     #[error("protocol {0}")]
     Protocol(&'static str), // FIXME
+                            //
     #[error("io")]
     Io(#[from] std::io::Error),
+
     #[error("processor died")]
     ProcessorDied,
 }
@@ -38,8 +40,10 @@ pub enum Error {
 pub struct Shuttle<S, M, C> {
     #[pin]
     framed: Framed<S, C>,
+
     #[pin]
     sender: Sender<M>,
+
     #[pin]
     receiver: Receiver<M>,
 }
@@ -64,10 +68,8 @@ where
     S: AsyncRead + AsyncWrite,
     C: Encoder<M> + Decoder<Item = M>,
 {
+    #[tracing::instrument(skip_all)]
     fn poll_send(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<<Self as Future>::Output> {
-        let span = tracing::info_span!("poll_send");
-        let _enter = span.enter();
-
         // can we write into channel?
         // acquire permit to do that
         let this = self.project();
@@ -101,10 +103,8 @@ where
         Poll::Ready(Ok(()))
     }
 
+    #[tracing::instrument(skip_all)]
     fn poll_recv(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<<Self as Future>::Output> {
-        let span = tracing::info_span!("poll_recv");
-        let _enter = span.enter();
-
         let mut this = self.project();
 
         // TODO remove map_err?
@@ -141,15 +141,12 @@ where
 {
     type Output = Result<(), Error>;
 
+    #[tracing::instrument(skip_all)]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut send_pending = false;
         let mut receive_pending = false;
         loop {
-            tracing::info!(
-                "poll: send_pending={} receive_pending={}",
-                send_pending,
-                receive_pending,
-            );
+            tracing::info!(send_pending, receive_pending, "poll");
             if send_pending && receive_pending {
                 return Poll::Pending;
             }

@@ -14,17 +14,16 @@ mod proto;
 
 #[tracing::instrument(skip_all)]
 async fn echo_worker(mut receiver: Receiver<String>, sender: Sender<String>) {
-    tracing::info!("echo: waiting");
+    tracing::info!("waiting");
     while let Some(msg) = receiver.recv().await {
-        tracing::info!("echo: got message {}", msg);
+        tracing::info!("got message {msg}");
         sender.send(msg).await.expect("disconnected");
-        tracing::info!("echo: sent");
+        tracing::info!("sent");
     }
 }
 
 async fn server() -> io::Result<()> {
     let listener = TcpListener::bind(ADDR).await?;
-
     let (stream, _) = listener.accept().await?;
 
     let (send_tx, send_rx) = tokio::sync::mpsc::channel::<String>(10);
@@ -33,7 +32,6 @@ async fn server() -> io::Result<()> {
     tokio::spawn(echo_worker(send_rx, reply_tx));
 
     let codec = proto::MyStringCodec {};
-
     Shuttle::new(stream, codec, send_tx, reply_rx)
         .await
         .expect("failed");
@@ -50,29 +48,28 @@ async fn client() -> io::Result<()> {
 
     // ping pong
     for i in 0..2 {
-        let msg = format!("Hello {}", i);
-        tracing::info!("sending: {}", msg);
-        codec
-            .encode(format!("Hello {}", i), &mut buf)
-            .expect("encode failed");
-        tracing::info!("writing: {}", msg);
+        let msg = format!("Hello {i}");
+        codec.encode(msg.clone(), &mut buf).expect("encode failed");
+
+        tracing::info!(">> writing: {msg}");
         stream.write_all_buf(&mut buf).await?;
-        tracing::info!("written: {}", msg);
+        tracing::info!("<< written: {msg}");
+
         buf.clear();
         loop {
             // The read_buf call will append to buf rather than overwrite existing data.
-            tracing::info!("reading");
+            tracing::info!(">> reading");
             let len = stream.read_buf(&mut buf).await?;
-            tracing::info!("read");
+            tracing::info!("<< read");
             if len == 0 {
                 while let Some(frame) = codec.decode_eof(&mut buf)? {
-                    tracing::info!("received: {}", frame);
+                    tracing::info!("received: {frame}");
                 }
                 break;
             }
 
             while let Some(frame) = codec.decode(&mut buf)? {
-                tracing::info!("received: {}", frame);
+                tracing::info!("received: {frame}");
             }
             break;
         }
