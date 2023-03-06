@@ -7,7 +7,6 @@ use tokio::{
 };
 use tokio_util::codec::{Decoder, Encoder};
 
-const MAX: usize = 8 * 1024 * 1024;
 const ADDR: &str = "127.0.0.1:34254";
 
 mod duplex;
@@ -54,12 +53,15 @@ async fn client() -> io::Result<()> {
         codec
             .encode(format!("Hello {}", i), &mut buf)
             .expect("encode failed");
+        println!("writing: {}", msg);
         stream.write_all_buf(&mut buf).await?;
+        println!("written: {}", msg);
         buf.clear();
         loop {
             // The read_buf call will append to buf rather than overwrite existing data.
+            println!("reading");
             let len = stream.read_buf(&mut buf).await?;
-
+            println!("read");
             if len == 0 {
                 while let Some(frame) = codec.decode_eof(&mut buf)? {
                     println!("received: {}", frame);
@@ -70,6 +72,7 @@ async fn client() -> io::Result<()> {
             while let Some(frame) = codec.decode(&mut buf)? {
                 println!("received: {}", frame);
             }
+            break;
         }
         buf.clear()
     }

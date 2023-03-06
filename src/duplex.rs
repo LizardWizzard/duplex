@@ -19,6 +19,11 @@ use tokio_util::codec::Decoder;
 use tokio_util::codec::Encoder;
 use tokio_util::codec::Framed;
 
+fn inspect<T>(p: Poll<T>, ctx: &'static str) -> Poll<T> {
+    println!("{ctx} pending: {}", p.is_pending());
+    p
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("protocol {0}")]
@@ -30,11 +35,7 @@ pub enum Error {
 }
 
 #[pin_project]
-pub struct Shuttle<S, M, C>
-where
-    S: AsyncRead + AsyncWrite,
-    C: Encoder<M> + Decoder<Item = M>,
-{
+pub struct Shuttle<S, M, C> {
     #[pin]
     framed: Framed<S, C>,
     #[pin]
@@ -46,7 +47,7 @@ where
 impl<S, M, C> Shuttle<S, M, C>
 where
     S: AsyncRead + AsyncWrite,
-    C: Encoder<M> + Decoder<Item = M>,
+    C: Encoder<M, Error = io::Error> + Decoder<Item = M, Error = io::Error>,
 {
     pub fn new(stream: S, codec: C, sender: Sender<M>, receiver: Receiver<M>) -> Self {
         let framed = codec.framed(stream);
@@ -68,18 +69,26 @@ where
         // acquire permit to do that
         let this = self.project();
 
+        // TODO pukable stream analogous to https://docs.rs/futures/latest/futures/sink/struct.Buffer.html
+        //     but with access to internal Buffer
+        //     or emulate with poll_flush on Buffer, ready means empty buf?
+
+        // TODO reserve_owned, or slot
         let fut = this.sender.reserve();
         pin!(fut);
 
-        let permit = match ready!(fut.poll(cx)) {
+        // TODO if let else
+        println!("poll_receive pre poll_reserve");
+        let permit = match ready!(inspect(fut.poll(cx), "reserve.poll")) {
             Ok(p) => p,
             Err(_) => return Poll::Ready(Err(Error::ProcessorDied)),
         };
+        println!("poll_receive post poll_reserve");
 
         // permit acquired, write to underlying framed
         let framed = this.framed;
 
-        let frame = match ready!(framed.poll_next(cx)) {
+        let frame = match ready!(inspect(framed.poll_next(cx), "framed.poll_next")) {
             Some(frame) => frame.map_err(|_| Error::Protocol("whoopsie"))?,
             None => return Poll::Ready(Err(Error::Io(io::Error::from(ErrorKind::UnexpectedEof)))),
         };
@@ -92,12 +101,24 @@ where
     fn poll_receive(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<<Self as Future>::Output> {
         let mut this = self.project();
 
-        ready!(this.framed.poll_ready(cx));
+        // TODO remove map_err?
+        println!("poll_receive pre poll_ready");
+        ready!(inspect(
+            this.framed.as_mut().poll_ready(cx),
+            "framed.poll_ready"
+        ))
+        .map_err(|_| Error::Protocol("uh oh"))?;
+        println!("poll_receive post poll_ready");
 
-        let frame = match ready!(this.receiver.poll_recv(cx)) {
+        println!("poll_receive pre poll_recv");
+        let frame = match ready!(inspect(
+            this.receiver.as_mut().poll_recv(cx),
+            "receiver.poll_recv"
+        )) {
             Some(frame) => frame,
             None => return Poll::Ready(Err(Error::ProcessorDied)),
         };
+        println!("poll_receive post poll_recv");
 
         this.framed
             .start_send(frame)
@@ -114,22 +135,22 @@ where
 {
     type Output = Result<(), Error>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut send_pending = false;
         let mut receive_pending = false;
         loop {
+            dbg!(send_pending, receive_pending);
             if send_pending && receive_pending {
                 return Poll::Pending;
             }
-            
 
-            match self.poll_send(cx) {
+            match inspect(self.as_mut().poll_send(cx), "poll_send") {
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Ready(Ok(())) => { /* send succeeded */ }
                 Poll::Pending => send_pending = true,
             }
 
-            match self.poll_receive(cx) {
+            match inspect(self.as_mut().poll_receive(cx), "poll_receive") {
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Ready(Ok(())) => { /* receive succeeded */ }
                 Poll::Pending => receive_pending = true,
