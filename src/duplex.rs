@@ -156,16 +156,20 @@ where
                 return Poll::Pending;
             }
 
-            match inspect!(self.as_mut().poll_send(cx), "poll_send") {
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Ready(Ok(())) => { /* send succeeded */ }
-                Poll::Pending => send_pending = true,
+            if !send_pending {
+                match inspect!(self.as_mut().poll_send(cx), "poll_send") {
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Ready(Ok(())) => { /* send succeeded */ }
+                    Poll::Pending => send_pending = true,
+                }
             }
 
-            match inspect!(self.as_mut().poll_recv(cx), "poll_recv") {
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Ready(Ok(())) => { /* receive succeeded */ }
-                Poll::Pending => receive_pending = true,
+            if !receive_pending {
+                match inspect!(self.as_mut().poll_recv(cx), "poll_recv") {
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Ready(Ok(())) => { /* receive succeeded */ }
+                    Poll::Pending => receive_pending = true,
+                }
             }
         }
     }
