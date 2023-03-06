@@ -149,10 +149,11 @@ where
     #[tracing::instrument(skip_all)]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut send_pending = false;
-        let mut receive_pending = false;
+        let mut recv_pending = false;
         loop {
-            tracing::info!(send_pending, receive_pending, "poll");
-            if send_pending && receive_pending {
+            tracing::info!(send_pending, recv_pending, "iteration");
+            if send_pending && recv_pending {
+                tracing::info!("YIELD");
                 return Poll::Pending;
             }
 
@@ -164,11 +165,11 @@ where
                 }
             }
 
-            if !receive_pending {
+            if !recv_pending {
                 match inspect!(self.as_mut().poll_recv(cx), "poll_recv") {
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                     Poll::Ready(Ok(())) => { /* receive succeeded */ }
-                    Poll::Pending => receive_pending = true,
+                    Poll::Pending => recv_pending = true,
                 }
             }
         }
