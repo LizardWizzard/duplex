@@ -84,6 +84,19 @@ where
     }
 }
 
+impl<S, M, C> Future for Shuttle<S, M, C>
+where
+    M: Send + 'static,
+    S: AsyncRead + AsyncWrite,
+    C: Encoder<M, Error = io::Error> + Decoder<Item = M, Error = io::Error>,
+{
+    type Output = Result<(), Error>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.poll_main(cx)
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 enum CopyError<StreamError, SinkError> {
     #[error("stream hangup")]
@@ -146,25 +159,14 @@ where
             CopyError::Sink(_) => Error::ClientHangup,
         })
     }
-}
 
-impl<S, M, C> Future for Shuttle<S, M, C>
-where
-    M: Send + 'static,
-    S: AsyncRead + AsyncWrite,
-    C: Encoder<M, Error = io::Error> + Decoder<Item = M, Error = io::Error>,
-{
-    type Output = Result<(), Error>;
-
-    #[tracing::instrument(skip_all)]
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        tracing::info!("POLL");
+    #[tracing::instrument(name = "poll", skip_all)]
+    fn poll_main(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<<Self as Future>::Output> {
         let mut send_pending = false;
         let mut recv_pending = false;
         loop {
             tracing::info!(send_pending, recv_pending, "iteration");
             if send_pending && recv_pending {
-                tracing::info!("YIELD");
                 return Poll::Pending;
             }
 
