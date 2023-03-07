@@ -99,20 +99,20 @@ fn poll_copy<StreamError, SinkError, M>(
     cx: &mut Context<'_>,
 ) -> Poll<Result<(), CopyError<StreamError, SinkError>>> {
     // Flush a buffered message before fetching a new one.
-    let res = inspect!(sink.as_mut().poll_flush(cx), "sender.poll_flush");
+    let res = inspect!(sink.as_mut().poll_flush(cx), "sink.poll_flush");
     ready!(res).map_err(CopyError::Sink)?;
 
     // Now it's time to prepare for the `start_send` below.
-    let res = inspect!(sink.as_mut().poll_ready(cx), "sender.poll_ready");
+    let res = inspect!(sink.as_mut().poll_ready(cx), "sink.poll_ready");
     ready!(res).map_err(CopyError::Sink)?;
 
-    let res = inspect!(stream.poll_next(cx), "framed.poll_next");
+    let res = inspect!(stream.poll_next(cx), "stream.poll_next");
     let frame = match ready!(res) {
         None => return Poll::Ready(Err(CopyError::Stream(None))),
         Some(frame) => frame.map_err(|e| CopyError::Stream(Some(e)))?,
     };
 
-    tracing::info!("sender.start_send");
+    tracing::info!("sink.start_send");
     sink.start_send(frame).map_err(CopyError::Sink)?;
 
     Poll::Ready(Ok(()))
