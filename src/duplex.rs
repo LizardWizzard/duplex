@@ -1,5 +1,4 @@
 use std::io;
-use std::io::ErrorKind;
 use std::pin::Pin;
 use std::task::ready;
 use std::task::Context;
@@ -19,6 +18,7 @@ use tokio::sync::mpsc::Sender;
 use tokio_util::codec::Decoder;
 use tokio_util::codec::Encoder;
 use tokio_util::codec::Framed;
+use tokio_util::sync::PollSendError;
 use tokio_util::sync::PollSender;
 
 macro_rules! inspect {
@@ -54,6 +54,14 @@ pub enum Error {
     /// The inbound stream has been shut down.
     #[error("ClientHangup")]
     ClientHangup,
+}
+
+impl Error {
+    /// [`PollSendError`] only happens when the receiver has been dropped.
+    /// If the server doesn't need the nested `M`, why should we care?
+    fn map_server_hangup<M>(_: PollSendError<M>) -> Self {
+        Self::ServerHangup
+    }
 }
 
 #[pin_project]
@@ -97,7 +105,7 @@ where
 
         // Flush a buffered message before fetching a new one.
         let res = inspect!(sender.as_mut().poll_flush(cx), "sender.poll_flush");
-        ready!(res).map_err(|_| Error::ServerHangup)?;
+        ready!(res).map_err(Error::map_server_hangup)?;
 
         let res = inspect!(this.framed.poll_next(cx), "framed.poll_next");
         let frame = ready!(res).transpose()?.ok_or(Error::ClientHangup)?;
@@ -108,35 +116,27 @@ where
         assert!(matches!(res, Poll::Ready(Ok(()))));
 
         tracing::info!("sender.start_send");
-        sender.start_send(frame).map_err(|_| Error::ServerHangup)?;
+        sender.start_send(frame).map_err(Error::map_server_hangup)?;
 
         Poll::Ready(Ok(()))
     }
 
     fn poll_recv(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<<Self as Future>::Output> {
         let mut this = self.project();
+        let mut framed = this.framed;
 
-        ready!(inspect!(
-            this.framed.as_mut().poll_ready(cx),
-            "framed.poll_ready"
-        ))?;
+        let res = inspect!(framed.as_mut().poll_ready(cx), "framed.poll_ready");
+        ready!(res)?;
 
         // NOTE: there can be a better strategy. We can move outer loop into this function,
-        //     so we take multiple messages and flush them with single flush call
-        ready!(inspect!(
-            this.framed.as_mut().poll_flush(cx),
-            "framed.poll_flush"
-        ))?;
+        //       so we take multiple messages and flush them with single flush call.
+        let res = inspect!(framed.as_mut().poll_flush(cx), "framed.poll_flush");
+        ready!(res)?;
 
-        let frame = match ready!(inspect!(
-            this.receiver.as_mut().poll_recv(cx),
-            "receiver.poll_recv"
-        )) {
-            Some(frame) => frame,
-            None => return Poll::Ready(Err(Error::ServerHangup)),
-        };
+        let res = inspect!(this.receiver.poll_recv(cx), "receiver.poll_recv");
+        let frame = ready!(res).ok_or(Error::ServerHangup)?;
 
-        this.framed.as_mut().start_send(frame)?;
+        framed.as_mut().start_send(frame)?;
 
         Poll::Ready(Ok(()))
     }
