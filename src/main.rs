@@ -1,11 +1,14 @@
-use bytes::BytesMut;
+use std::io::ErrorKind;
+
 use duplex::Shuttle;
+use futures::SinkExt;
 use tokio::{
-    io::{self, AsyncReadExt, AsyncWriteExt},
+    io::{self},
     net::{TcpListener, TcpStream},
     sync::mpsc::{Receiver, Sender},
 };
-use tokio_util::codec::{Decoder, Encoder};
+use tokio_stream::StreamExt;
+use tokio_util::codec::{Decoder, Framed};
 use tracing::Instrument;
 
 const ADDR: &str = "127.0.0.1:34254";
@@ -41,74 +44,52 @@ async fn server() -> io::Result<()> {
     Ok(())
 }
 
-async fn send(
-    msg: String,
-    codec: &mut proto::MyStringCodec,
-    mut buf: &mut BytesMut,
-    stream: &mut TcpStream,
-) -> io::Result<()> {
-    codec.encode(msg.clone(), &mut buf).expect("encode failed");
-
+async fn send(msg: String, framed: &mut Framed<TcpStream, proto::MyStringCodec>) -> io::Result<()> {
     tracing::info!(">> writing: {msg}");
-    stream.write_all_buf(&mut buf).await?;
+    framed.send(msg.clone()).await?;
     tracing::info!("<< written: {msg}");
-
     Ok(())
 }
 
-async fn recv(
-    codec: &mut proto::MyStringCodec,
-    mut buf: &mut BytesMut,
-    stream: &mut TcpStream,
-) -> io::Result<()> {
-    loop {
-        // The read_buf call will append to buf rather than overwrite existing data.
-        tracing::info!(">> reading");
-        let len = stream.read_buf(&mut buf).await?;
-        tracing::info!("<< read");
-        if len == 0 {
-            while let Some(frame) = codec.decode_eof(&mut buf)? {
-                tracing::info!("received: {frame}");
-            }
-            break;
-        }
+async fn recv(framed: &mut Framed<TcpStream, proto::MyStringCodec>) -> io::Result<()> {
+    tracing::info!(">> receiving");
+    let msg = framed
+        .next()
+        .await
+        .transpose()?
+        .ok_or(io::Error::from(ErrorKind::UnexpectedEof))?;
 
-        while let Some(frame) = codec.decode(&mut buf)? {
-            tracing::info!("received: {frame}");
-        }
-        break;
-    }
+    tracing::info!("<< received: {msg}");
     Ok(())
 }
 
 #[tracing::instrument]
 async fn client() -> io::Result<()> {
-    let mut stream = TcpStream::connect(ADDR).await?;
+    let stream = TcpStream::connect(ADDR).await?;
 
-    let mut codec = proto::MyStringCodec {};
-    let mut buf = BytesMut::new();
+    let codec = proto::MyStringCodec {};
+    let mut framed = codec.framed(stream);
 
     // ping pong
     for i in 0..2 {
         let msg = format!("ping pong {i}");
-        send(msg, &mut codec, &mut buf, &mut stream).await?;
+        send(msg, &mut framed).await?;
 
-        buf.clear();
-        recv(&mut codec, &mut buf, &mut stream).await?;
-        buf.clear()
+        recv(&mut framed).await?;
     }
 
     // 4 in 4 out
     for i in 0..4 {
-        let msg = format!("4x4 aa {i}");
-        send(msg, &mut codec, &mut buf, &mut stream).await?;
-        buf.clear();
+        let msg = format!("4x4 a {i}");
+        send(msg, &mut framed).await?;
     }
 
     for _ in 0..4 {
-        recv(&mut codec, &mut buf, &mut stream).await?;
-        buf.clear()
+        recv(&mut framed).await?;
     }
+
+    // TODO other possible tests: SinkExt::feed, SinkExt::send_all
+    // https://docs.rs/futures/latest/futures/sink/trait.SinkExt.html#method.feed
 
     Ok(())
 }
