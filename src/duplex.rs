@@ -4,10 +4,9 @@ use std::task::ready;
 use std::task::Context;
 use std::task::Poll;
 
-use futures::sink::Buffer;
 use futures::Future;
-use futures::Stream;
-use futures::{Sink, SinkExt};
+use futures::Sink;
+use futures::{Stream, StreamExt};
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 
@@ -15,10 +14,10 @@ use pin_project::pin_project;
 use tokio::pin;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::codec::Decoder;
 use tokio_util::codec::Encoder;
 use tokio_util::codec::Framed;
-use tokio_util::sync::PollSendError;
 use tokio_util::sync::PollSender;
 
 macro_rules! inspect {
@@ -56,24 +55,15 @@ pub enum Error {
     ClientHangup,
 }
 
-impl Error {
-    /// [`PollSendError`] only happens when the receiver has been dropped.
-    /// If the server doesn't need the nested `M`, why should we care?
-    fn map_server_hangup<M>(_: PollSendError<M>) -> Self {
-        Self::ServerHangup
-    }
-}
-
 #[pin_project]
 pub struct Shuttle<S, M, C> {
     #[pin]
     framed: Framed<S, C>,
 
     #[pin]
-    sender: Buffer<PollSender<M>, M>,
+    sender: PollSender<M>,
 
-    #[pin]
-    receiver: Receiver<M>,
+    receiver: ReceiverStream<M>,
 }
 
 impl<S, M, C> Shuttle<S, M, C>
@@ -83,7 +73,8 @@ where
     C: Encoder<M, Error = io::Error> + Decoder<Item = M, Error = io::Error>,
 {
     pub fn new(stream: S, codec: C, sender: Sender<M>, receiver: Receiver<M>) -> Self {
-        let sender = PollSender::new(sender).buffer(1);
+        let receiver = ReceiverStream::new(receiver);
+        let sender = PollSender::new(sender);
         let framed = codec.framed(stream);
         Self {
             framed,
@@ -91,6 +82,40 @@ where
             receiver,
         }
     }
+}
+
+#[derive(thiserror::Error, Debug)]
+enum CopyError<StreamError, SinkError> {
+    #[error("stream hangup")]
+    Stream(Option<StreamError>),
+
+    #[error("sink hangup")]
+    Sink(SinkError),
+}
+
+fn poll_copy<StreamError, SinkError, M>(
+    stream: Pin<&mut impl Stream<Item = Result<M, StreamError>>>,
+    mut sink: Pin<&mut impl Sink<M, Error = SinkError>>,
+    cx: &mut Context<'_>,
+) -> Poll<Result<(), CopyError<StreamError, SinkError>>> {
+    // Flush a buffered message before fetching a new one.
+    let res = inspect!(sink.as_mut().poll_flush(cx), "sender.poll_flush");
+    ready!(res).map_err(CopyError::Sink)?;
+
+    // Now it's time to prepare for the `start_send` below.
+    let res = inspect!(sink.as_mut().poll_ready(cx), "sender.poll_ready");
+    ready!(res).map_err(CopyError::Sink)?;
+
+    let res = inspect!(stream.poll_next(cx), "framed.poll_next");
+    let frame = match ready!(res) {
+        None => return Poll::Ready(Err(CopyError::Stream(None))),
+        Some(frame) => frame.map_err(|e| CopyError::Stream(Some(e)))?,
+    };
+
+    tracing::info!("sender.start_send");
+    sink.start_send(frame).map_err(CopyError::Sink)?;
+
+    Poll::Ready(Ok(()))
 }
 
 impl<S, M, C> Shuttle<S, M, C>
@@ -101,44 +126,25 @@ where
 {
     fn poll_send(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<<Self as Future>::Output> {
         let this = self.project();
-        let mut sender = this.sender;
 
-        // Flush a buffered message before fetching a new one.
-        let res = inspect!(sender.as_mut().poll_flush(cx), "sender.poll_flush");
-        ready!(res).map_err(Error::map_server_hangup)?;
-
-        let res = inspect!(this.framed.poll_next(cx), "framed.poll_next");
-        let frame = ready!(res).transpose()?.ok_or(Error::ClientHangup)?;
-
-        // The stream has been flushed, so we definitely should have a slot.
-        // However, we *must* call this regardless, just to be on the safe side.
-        let res = inspect!(sender.as_mut().poll_ready(cx), "sender.poll_ready");
-        assert!(matches!(res, Poll::Ready(Ok(()))));
-
-        tracing::info!("sender.start_send");
-        sender.start_send(frame).map_err(Error::map_server_hangup)?;
-
-        Poll::Ready(Ok(()))
+        poll_copy(this.framed, this.sender, cx).map_err(|e| match e {
+            CopyError::Stream(Some(e)) => Error::from(e),
+            CopyError::Stream(None) => Error::ClientHangup,
+            CopyError::Sink(_) => Error::ServerHangup,
+        })
     }
 
     fn poll_recv(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<<Self as Future>::Output> {
-        let mut this = self.project();
-        let mut framed = this.framed;
+        let this = self.project();
 
-        let res = inspect!(framed.as_mut().poll_ready(cx), "framed.poll_ready");
-        ready!(res)?;
+        // Channel's receiver returns plain `M` so we have to wrap it.
+        let receiver = this.receiver.map(Ok::<M, std::convert::Infallible>);
+        pin!(receiver);
 
-        // NOTE: there can be a better strategy. We can move outer loop into this function,
-        //       so we take multiple messages and flush them with single flush call.
-        let res = inspect!(framed.as_mut().poll_flush(cx), "framed.poll_flush");
-        ready!(res)?;
-
-        let res = inspect!(this.receiver.poll_recv(cx), "receiver.poll_recv");
-        let frame = ready!(res).ok_or(Error::ServerHangup)?;
-
-        framed.as_mut().start_send(frame)?;
-
-        Poll::Ready(Ok(()))
+        poll_copy(receiver, this.framed, cx).map_err(|e| match e {
+            CopyError::Stream(_) => Error::ServerHangup,
+            CopyError::Sink(_) => Error::ClientHangup,
+        })
     }
 }
 
