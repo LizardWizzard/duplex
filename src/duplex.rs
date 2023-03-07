@@ -47,8 +47,13 @@ pub enum Error {
     #[error("Io")]
     Io(#[from] std::io::Error),
 
-    #[error("Processor died")]
-    ProcessorDied,
+    /// A local user (server) is no longer interested in receiving messages.
+    #[error("ServerHangup")]
+    ServerHangup,
+
+    /// The inbound stream has been shut down.
+    #[error("ClientHangup")]
+    ClientHangup,
 }
 
 #[pin_project]
@@ -87,24 +92,23 @@ where
     C: Encoder<M, Error = io::Error> + Decoder<Item = M, Error = io::Error>,
 {
     fn poll_send(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<<Self as Future>::Output> {
-        let mut this = self.project();
+        let this = self.project();
+        let mut sender = this.sender;
 
         // Flush a buffered message before fetching a new one.
-        ready!(this
-            .sender
-            .as_mut()
-            .poll_flush(cx)
-            .map_err(|_| Error::ProcessorDied))?;
+        let res = inspect!(sender.as_mut().poll_flush(cx), "sender.poll_flush");
+        ready!(res).map_err(|_| Error::ServerHangup)?;
 
-        let frame = match ready!(inspect!(this.framed.poll_next(cx), "framed.poll_next")) {
-            Some(frame) => frame?,
-            None => return Poll::Ready(Err(Error::Io(io::Error::from(ErrorKind::UnexpectedEof)))),
-        };
+        let res = inspect!(this.framed.poll_next(cx), "framed.poll_next");
+        let frame = ready!(res).transpose()?.ok_or(Error::ClientHangup)?;
 
-        // We don't need to call sender's `poll_ready` because it's been flushed.
-        this.sender
-            .start_send(frame)
-            .map_err(|_| Error::ProcessorDied)?;
+        // The stream has been flushed, so we definitely should have a slot.
+        // However, we *must* call this regardless, just to be on the safe side.
+        let res = inspect!(sender.as_mut().poll_ready(cx), "sender.poll_ready");
+        assert!(matches!(res, Poll::Ready(Ok(()))));
+
+        tracing::info!("sender.start_send");
+        sender.start_send(frame).map_err(|_| Error::ServerHangup)?;
 
         Poll::Ready(Ok(()))
     }
@@ -129,7 +133,7 @@ where
             "receiver.poll_recv"
         )) {
             Some(frame) => frame,
-            None => return Poll::Ready(Err(Error::ProcessorDied)),
+            None => return Poll::Ready(Err(Error::ServerHangup)),
         };
 
         this.framed.as_mut().start_send(frame)?;
