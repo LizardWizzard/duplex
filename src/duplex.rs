@@ -166,6 +166,7 @@ where
         loop {
             tracing::info!(send_pending, recv_pending, "iteration");
             if send_pending && recv_pending {
+                cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
 

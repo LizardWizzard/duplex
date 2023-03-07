@@ -100,7 +100,7 @@ async fn client() -> io::Result<()> {
 
     // 4 in 4 out
     for i in 0..4 {
-        let msg = format!("4x4 aa {i}");
+        let msg = format!("4x4 a {i}");
         send(msg, &mut codec, &mut buf, &mut stream).await?;
         buf.clear();
     }
