@@ -93,7 +93,7 @@ where
     type Output = Result<(), Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.poll_main(cx)
+        inspect!(self.poll_main(cx), "poll")
     }
 }
 
@@ -160,7 +160,6 @@ where
         })
     }
 
-    #[tracing::instrument(name = "poll", skip_all)]
     fn poll_main(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<<Self as Future>::Output> {
         let mut send_pending = false;
         let mut recv_pending = false;
