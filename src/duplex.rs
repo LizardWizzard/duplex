@@ -5,10 +5,10 @@ use std::task::ready;
 use std::task::Context;
 use std::task::Poll;
 
-use futures::Future;
 use futures::sink::Buffer;
-use futures::{Sink, SinkExt};
+use futures::Future;
 use futures::Stream;
+use futures::{Sink, SinkExt};
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 
@@ -41,13 +41,13 @@ macro_rules! inspect {
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("protocol {0}")]
-    Protocol(&'static str), // FIXME
-    //
-    #[error("io")]
+    // NOTE: there is no separate variant for protocol error
+    //     for simplicity we merge it with io::Error
+    //     this can be easily adjusted
+    #[error("Io")]
     Io(#[from] std::io::Error),
 
-    #[error("processor died")]
+    #[error("Processor died")]
     ProcessorDied,
 }
 
@@ -84,21 +84,27 @@ impl<S, M, C> Shuttle<S, M, C>
 where
     M: Send + 'static,
     S: AsyncRead + AsyncWrite,
-    C: Encoder<M> + Decoder<Item = M>,
+    C: Encoder<M, Error = io::Error> + Decoder<Item = M, Error = io::Error>,
 {
     fn poll_send(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<<Self as Future>::Output> {
         let mut this = self.project();
 
         // Flush a buffered message before fetching a new one.
-        ready!(this.sender.as_mut().poll_flush(cx).map_err(|_| Error::ProcessorDied))?;
+        ready!(this
+            .sender
+            .as_mut()
+            .poll_flush(cx)
+            .map_err(|_| Error::ProcessorDied))?;
 
         let frame = match ready!(inspect!(this.framed.poll_next(cx), "framed.poll_next")) {
-            Some(frame) => frame.map_err(|_| Error::Protocol("whoopsie"))?,
+            Some(frame) => frame?,
             None => return Poll::Ready(Err(Error::Io(io::Error::from(ErrorKind::UnexpectedEof)))),
         };
 
         // We don't need to call sender's `poll_ready` because it's been flushed.
-        this.sender.start_send(frame).map_err(|_| Error::ProcessorDied)?;
+        this.sender
+            .start_send(frame)
+            .map_err(|_| Error::ProcessorDied)?;
 
         Poll::Ready(Ok(()))
     }
@@ -106,12 +112,17 @@ where
     fn poll_recv(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<<Self as Future>::Output> {
         let mut this = self.project();
 
-        // TODO remove map_err?
         ready!(inspect!(
             this.framed.as_mut().poll_ready(cx),
             "framed.poll_ready"
-        ))
-        .map_err(|_| Error::Protocol("uh oh"))?;
+        ))?;
+
+        // NOTE: there can be a better strategy. We can move outer loop into this function,
+        //     so we take multiple messages and flush them with single flush call
+        ready!(inspect!(
+            this.framed.as_mut().poll_flush(cx),
+            "framed.poll_flush"
+        ))?;
 
         let frame = match ready!(inspect!(
             this.receiver.as_mut().poll_recv(cx),
@@ -121,17 +132,7 @@ where
             None => return Poll::Ready(Err(Error::ProcessorDied)),
         };
 
-        this.framed
-            .as_mut()
-            .start_send(frame)
-            .map_err(|_| Error::Protocol("uh oh"))?;
-
-        // TODO think about moving outer loop into the function, so we gather messages amortizing the flush cost
-        ready!(inspect!(
-            this.framed.as_mut().poll_flush(cx),
-            "framed.poll_flush"
-        ))
-        .map_err(|_| Error::Protocol("uh oh"))?;
+        this.framed.as_mut().start_send(frame)?;
 
         Poll::Ready(Ok(()))
     }
@@ -141,7 +142,7 @@ impl<S, M, C> Future for Shuttle<S, M, C>
 where
     M: Send + 'static,
     S: AsyncRead + AsyncWrite,
-    C: Encoder<M> + Decoder<Item = M>,
+    C: Encoder<M, Error = io::Error> + Decoder<Item = M, Error = io::Error>,
 {
     type Output = Result<(), Error>;
 
