@@ -1,6 +1,6 @@
 use std::io::ErrorKind;
 
-use duplex::Mux;
+use duplex::{HalfShutdownBehavior, Mux};
 use futures::SinkExt;
 use tokio::{
     io::{self},
@@ -37,9 +37,15 @@ async fn server() -> io::Result<()> {
     tokio::spawn(echo_worker(send_rx, reply_tx).in_current_span());
 
     let codec = proto::MyStringCodec {};
-    Mux::new(stream, codec, send_tx, reply_rx)
-        .await
-        .expect("failed");
+    Mux::new(
+        stream,
+        codec,
+        send_tx,
+        reply_rx,
+        HalfShutdownBehavior::ShutdownBoth,
+    )
+    .await
+    .expect("failed");
 
     Ok(())
 }
@@ -90,6 +96,8 @@ async fn client() -> io::Result<()> {
 
     // TODO other possible tests: SinkExt::feed, SinkExt::send_all
     // https://docs.rs/futures/latest/futures/sink/trait.SinkExt.html#method.feed
+
+    // TODO sort of fuzz test with different messages lengths
 
     Ok(())
 }

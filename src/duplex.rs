@@ -55,6 +55,11 @@ pub enum Error {
     ClientHangup,
 }
 
+pub enum HalfShutdownBehavior {
+    ShutdownBoth,
+    KeepOne,
+}
+
 #[pin_project]
 pub struct Mux<S, M, C> {
     #[pin]
@@ -64,6 +69,11 @@ pub struct Mux<S, M, C> {
     sender: PollSender<M>,
 
     receiver: ReceiverStream<M>,
+
+    half_shutdown_behavior: HalfShutdownBehavior,
+
+    send_alive: bool,
+    recv_alive: bool,
 }
 
 impl<S, M, C> Mux<S, M, C>
@@ -72,7 +82,13 @@ where
     S: AsyncRead + AsyncWrite,
     C: Encoder<M, Error = io::Error> + Decoder<Item = M, Error = io::Error>,
 {
-    pub fn new(stream: S, codec: C, sender: Sender<M>, receiver: Receiver<M>) -> Self {
+    pub fn new(
+        stream: S,
+        codec: C,
+        sender: Sender<M>,
+        receiver: Receiver<M>,
+        half_shutdown_behavior: HalfShutdownBehavior,
+    ) -> Self {
         let receiver = ReceiverStream::new(receiver);
         let sender = PollSender::new(sender);
         let framed = codec.framed(stream);
@@ -80,6 +96,9 @@ where
             framed,
             sender,
             receiver,
+            half_shutdown_behavior,
+            send_alive: true,
+            recv_alive: true,
         }
     }
 }
@@ -131,12 +150,53 @@ fn poll_copy<StreamError, SinkError, M>(
     Poll::Ready(Ok(()))
 }
 
+enum Who {
+    Send,
+    Recv,
+}
+
 impl<S, M, C> Mux<S, M, C>
 where
     M: Send + 'static,
     S: AsyncRead + AsyncWrite,
     C: Encoder<M, Error = io::Error> + Decoder<Item = M, Error = io::Error>,
 {
+    fn validate_shutdown(self: Pin<&mut Self>, e: Error, who: Who) -> Result<(), Error> {
+        if !matches!(e, Error::ServerHangup) {
+            return Err(e);
+        }
+
+        let this = self.project();
+
+        match this.half_shutdown_behavior {
+            HalfShutdownBehavior::ShutdownBoth => return Err(e),
+            HalfShutdownBehavior::KeepOne => match who {
+                Who::Send => {
+                    // server hanged during our attepmt to send to it
+                    // if other part is already dead move on to shutdown the Mux
+                    if !*this.recv_alive {
+                        return Err(e);
+                    }
+                    // The other half is fine
+                    // mark our side as dead
+                    *this.send_alive = false;
+                }
+                Who::Recv => {
+                    // server hanged during our attempt to receive from it
+                    // if other part is already dead move on to shutdown the Mux
+                    if !*this.send_alive {
+                        return Err(e);
+                    }
+                    // The other half is fine
+                    // mark our side as dead
+                    *this.recv_alive = false;
+                }
+            },
+        }
+
+        Ok(())
+    }
+
     fn poll_send(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<<Self as Future>::Output> {
         let this = self.project();
 
@@ -163,23 +223,24 @@ where
     fn poll_main(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<<Self as Future>::Output> {
         let mut send_pending = false;
         let mut recv_pending = false;
+
         loop {
             tracing::info!(send_pending, recv_pending, "iteration");
             if send_pending && recv_pending {
                 return Poll::Pending;
             }
 
-            if !send_pending {
+            if !send_pending && self.as_mut().send_alive {
                 match inspect!(self.as_mut().poll_send(cx), "poll_send") {
-                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Ready(Err(e)) => self.as_mut().validate_shutdown(e, Who::Send)?,
                     Poll::Ready(Ok(())) => { /* send succeeded */ }
                     Poll::Pending => send_pending = true,
                 }
             }
 
-            if !recv_pending {
+            if !recv_pending && self.recv_alive {
                 match inspect!(self.as_mut().poll_recv(cx), "poll_recv") {
-                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Ready(Err(e)) => self.as_mut().validate_shutdown(e, Who::Recv)?,
                     Poll::Ready(Ok(())) => { /* receive succeeded */ }
                     Poll::Pending => recv_pending = true,
                 }
