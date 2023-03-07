@@ -3,7 +3,6 @@ use duplex::Shuttle;
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    stream,
     sync::mpsc::{Receiver, Sender},
 };
 use tokio_util::codec::{Decoder, Encoder};
@@ -29,8 +28,8 @@ async fn server() -> io::Result<()> {
     let listener = TcpListener::bind(ADDR).await?;
     let (stream, _) = listener.accept().await?;
 
-    let (send_tx, send_rx) = tokio::sync::mpsc::channel::<String>(10);
-    let (reply_tx, reply_rx) = tokio::sync::mpsc::channel::<String>(10);
+    let (send_tx, send_rx) = tokio::sync::mpsc::channel::<String>(2);
+    let (reply_tx, reply_rx) = tokio::sync::mpsc::channel::<String>(2);
 
     tokio::spawn(echo_worker(send_rx, reply_tx).in_current_span());
 
@@ -91,10 +90,22 @@ async fn client() -> io::Result<()> {
 
     // ping pong
     for i in 0..2 {
-        let msg = format!("Hello {i}");
+        let msg = format!("ping pong {i}");
         send(msg, &mut codec, &mut buf, &mut stream).await?;
 
         buf.clear();
+        recv(&mut codec, &mut buf, &mut stream).await?;
+        buf.clear()
+    }
+
+    // 4 in 4 out
+    for i in 0..4 {
+        let msg = format!("4x4 aa {i}");
+        send(msg, &mut codec, &mut buf, &mut stream).await?;
+        buf.clear();
+    }
+
+    for _ in 0..4 {
         recv(&mut codec, &mut buf, &mut stream).await?;
         buf.clear()
     }
