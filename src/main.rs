@@ -3,6 +3,7 @@ use duplex::Shuttle;
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    stream,
     sync::mpsc::{Receiver, Sender},
 };
 use tokio_util::codec::{Decoder, Encoder};
@@ -41,6 +42,46 @@ async fn server() -> io::Result<()> {
     Ok(())
 }
 
+async fn send(
+    msg: String,
+    codec: &mut proto::MyStringCodec,
+    mut buf: &mut BytesMut,
+    stream: &mut TcpStream,
+) -> io::Result<()> {
+    codec.encode(msg.clone(), &mut buf).expect("encode failed");
+
+    tracing::info!(">> writing: {msg}");
+    stream.write_all_buf(&mut buf).await?;
+    tracing::info!("<< written: {msg}");
+
+    Ok(())
+}
+
+async fn recv(
+    codec: &mut proto::MyStringCodec,
+    mut buf: &mut BytesMut,
+    stream: &mut TcpStream,
+) -> io::Result<()> {
+    loop {
+        // The read_buf call will append to buf rather than overwrite existing data.
+        tracing::info!(">> reading");
+        let len = stream.read_buf(&mut buf).await?;
+        tracing::info!("<< read");
+        if len == 0 {
+            while let Some(frame) = codec.decode_eof(&mut buf)? {
+                tracing::info!("received: {frame}");
+            }
+            break;
+        }
+
+        while let Some(frame) = codec.decode(&mut buf)? {
+            tracing::info!("received: {frame}");
+        }
+        break;
+    }
+    Ok(())
+}
+
 #[tracing::instrument]
 async fn client() -> io::Result<()> {
     let mut stream = TcpStream::connect(ADDR).await?;
@@ -51,30 +92,10 @@ async fn client() -> io::Result<()> {
     // ping pong
     for i in 0..2 {
         let msg = format!("Hello {i}");
-        codec.encode(msg.clone(), &mut buf).expect("encode failed");
-
-        tracing::info!(">> writing: {msg}");
-        stream.write_all_buf(&mut buf).await?;
-        tracing::info!("<< written: {msg}");
+        send(msg, &mut codec, &mut buf, &mut stream).await?;
 
         buf.clear();
-        loop {
-            // The read_buf call will append to buf rather than overwrite existing data.
-            tracing::info!(">> reading");
-            let len = stream.read_buf(&mut buf).await?;
-            tracing::info!("<< read");
-            if len == 0 {
-                while let Some(frame) = codec.decode_eof(&mut buf)? {
-                    tracing::info!("received: {frame}");
-                }
-                break;
-            }
-
-            while let Some(frame) = codec.decode(&mut buf)? {
-                tracing::info!("received: {frame}");
-            }
-            break;
-        }
+        recv(&mut codec, &mut buf, &mut stream).await?;
         buf.clear()
     }
 
