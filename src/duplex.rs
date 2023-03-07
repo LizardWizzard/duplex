@@ -56,7 +56,7 @@ pub enum Error {
 }
 
 #[pin_project]
-pub struct Shuttle<S, M, C> {
+pub struct Mux<S, M, C> {
     #[pin]
     framed: Framed<S, C>,
 
@@ -66,7 +66,7 @@ pub struct Shuttle<S, M, C> {
     receiver: ReceiverStream<M>,
 }
 
-impl<S, M, C> Shuttle<S, M, C>
+impl<S, M, C> Mux<S, M, C>
 where
     M: Send + 'static,
     S: AsyncRead + AsyncWrite,
@@ -84,7 +84,7 @@ where
     }
 }
 
-impl<S, M, C> Future for Shuttle<S, M, C>
+impl<S, M, C> Future for Mux<S, M, C>
 where
     M: Send + 'static,
     S: AsyncRead + AsyncWrite,
@@ -131,7 +131,7 @@ fn poll_copy<StreamError, SinkError, M>(
     Poll::Ready(Ok(()))
 }
 
-impl<S, M, C> Shuttle<S, M, C>
+impl<S, M, C> Mux<S, M, C>
 where
     M: Send + 'static,
     S: AsyncRead + AsyncWrite,

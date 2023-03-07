@@ -1,6 +1,6 @@
 use std::io::ErrorKind;
 
-use duplex::Shuttle;
+use duplex::Mux;
 use futures::SinkExt;
 use tokio::{
     io::{self},
@@ -37,7 +37,7 @@ async fn server() -> io::Result<()> {
     tokio::spawn(echo_worker(send_rx, reply_tx).in_current_span());
 
     let codec = proto::MyStringCodec {};
-    Shuttle::new(stream, codec, send_tx, reply_rx)
+    Mux::new(stream, codec, send_tx, reply_rx)
         .await
         .expect("failed");
 
