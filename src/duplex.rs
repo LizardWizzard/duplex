@@ -55,6 +55,8 @@ pub enum Error {
     ClientHangup,
 }
 
+/// Mux stands for multiplexer. It allows you to multiplex sending and receiving messages
+/// on a type that implements [`AsyncRead`] and [`AsyncWrite`].
 #[pin_project]
 pub struct Mux<S, M, C> {
     #[pin]

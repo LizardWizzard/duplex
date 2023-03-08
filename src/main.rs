@@ -34,6 +34,9 @@ async fn server() -> io::Result<()> {
     let (send_tx, send_rx) = tokio::sync::mpsc::channel::<String>(2);
     let (reply_tx, reply_rx) = tokio::sync::mpsc::channel::<String>(2);
 
+    // NOTE: Nothing stops one from using two tasks, one for reading, and one for writing.
+    //     Given the *M* in mpsc there can be multiple producers for replies
+    //     e g one that pushes WAL and another one that pushes heartbeats
     tokio::spawn(echo_worker(send_rx, reply_tx).in_current_span());
 
     let codec = proto::MyStringCodec {};
